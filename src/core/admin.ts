@@ -333,6 +333,27 @@ ${sharedStyles}
     </div>
 
     <div class="section">
+      <div class="section-title" data-i18n="jarRegistry">JAR Registry</div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="jarRegistryCheck" onchange="saveJarRegistryEnabled()">
+          <span data-i18n="jarRegistryLabel">Enable JAR registry analysis (precise class matching)</span>
+        </label>
+        <span class="status-text" id="jarRegistryStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </div>
+      <div style="margin-top:6px;font-size:0.8rem;color:var(--text-secondary)" data-i18n="jarRegistryDesc">Downloads JARs and parses DEX to extract class names for precise spider assignment</div>
+      <div id="jarRegistryInfo" style="margin-top:8px;font-size:0.8rem;color:var(--text-secondary)"></div>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-sm" id="jarRefreshBtn" onclick="refreshJarRegistry(true)" data-i18n="refreshJarRegistry">Refresh JAR Registry</button>
+        <button class="btn btn-sm" onclick="toggleJarReport()" data-i18n="viewReport">View Report</button>
+        <span class="status-text" id="jarRefreshStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </div>
+      <div id="jarReportPanel" style="display:none;margin-top:10px;padding:10px;background:var(--bg);border-radius:8px;font-size:0.8rem;max-height:400px;overflow:auto">
+        <div data-i18n="loading">Loading...</div>
+      </div>
+    </div>
+
+    <div class="section">
       <div class="section-title" data-i18n="nameTransform">Name Transform</div>
       <div class="nt-grid">
         <div>
@@ -410,6 +431,11 @@ const translations = {
     ntPromoReplacePh:'e.g. Premium', ntExtraPatternsPh:'e.g. sponsor[：:]\\\\S+',
     cronInterval:'Aggregation Schedule',
     speedTestToggle:'Site Speed Test', speedTestLabel:'Enable site speed test and unreachable filtering', speedTestDesc:'When disabled, all sites are kept without testing reachability',
+    jarRegistry:'JAR Registry', jarRegistryLabel:'Enable JAR registry analysis (precise class matching)', jarRegistryDesc:'Downloads JARs and parses DEX to extract class names for precise spider assignment',
+    refreshJarRegistry:'Refresh JAR Registry', viewReport:'View Report', jarRegistryDisabled:'Not enabled',
+    jarCount:'JARs', totalClasses:'Total classes', lastScanned:'Last scanned',
+    globalSpider:'Global Spider', coveredSites:'Covered sites', orphanedSites:'Orphaned sites',
+    refreshing:'Refreshing...', loading:'Loading...',
     cronEvery1h:'Every 1 hour', cronEvery3h:'Every 3 hours', cronEvery6h:'Every 6 hours',
     cronEvery12h:'Every 12 hours', cronEveryDay:'Once a day',
     save:'Save', saving:'Saving...', saved:'Saved', saveFailed:'Save failed',
@@ -458,6 +484,11 @@ const translations = {
     ntPromoReplacePh:'如 精选推荐', ntExtraPatternsPh:'如 sponsor[：:]\\\\S+',
     cronInterval:'聚合频率',
     speedTestToggle:'站点测速', speedTestLabel:'启用站点测速与不可达剔除', speedTestDesc:'关闭后保留所有站点，不进行可达性检测',
+    jarRegistry:'JAR 仓库', jarRegistryLabel:'启用 JAR 仓库分析（精确匹配类名）', jarRegistryDesc:'启用后聚合时会下载 JAR 并解析 DEX 提取类名，用于精确分配 spider',
+    refreshJarRegistry:'刷新 JAR 仓库', viewReport:'查看报告', jarRegistryDisabled:'未启用',
+    jarCount:'JAR 数量', totalClasses:'总类名', lastScanned:'上次扫描',
+    globalSpider:'全局 Spider', coveredSites:'覆盖站点', orphanedSites:'孤立站点',
+    refreshing:'刷新中...', loading:'加载中...',
     cronEvery1h:'每 1 小时', cronEvery3h:'每 3 小时', cronEvery6h:'每 6 小时',
     cronEvery12h:'每 12 小时', cronEveryDay:'每天一次',
     save:'保存', saving:'保存中...', saved:'已保存', saveFailed:'保存失败',
@@ -512,6 +543,7 @@ async function loadAll() {
   loadNameTransform();
   loadCronInterval();
   loadSpeedTest();
+  loadJarRegistry();
 }
 
 async function loadStatus() {
@@ -988,6 +1020,135 @@ async function saveSpeedTest() {
   }
 
   setTimeout(() => { status.textContent = ''; }, 3000);
+}
+
+// --- JAR Registry ---
+async function loadJarRegistry() {
+  try {
+    const res = await auth.authFetch('/admin/jar-registry/enabled');
+    if (res.ok) {
+      const d = await res.json();
+      $('jarRegistryCheck').checked = d.enabled;
+    }
+  } catch {}
+  try {
+    const res = await auth.authFetch('/admin/jar-registry');
+    if (res.ok) {
+      const d = await res.json();
+      const info = $('jarRegistryInfo');
+      if (d.updatedAt) {
+        const jarCount = Object.keys(d.jars).length;
+        const okCount = Object.values(d.jars).filter(j => j.status === 'ok').length;
+        const totalClasses = Object.values(d.jars).reduce((s, j) => s + (j.classes?.length || 0), 0);
+        info.innerHTML = t('jarCount') + ': ' + okCount + '/' + jarCount + ' ok | ' + t('totalClasses') + ': ' + totalClasses + ' | ' + t('lastScanned') + ': ' + new Date(d.updatedAt).toLocaleString();
+      } else {
+        info.textContent = t('jarRegistryDisabled');
+      }
+    }
+  } catch {}
+}
+
+async function saveJarRegistryEnabled() {
+  const status = $('jarRegistryStatus');
+  const enabled = $('jarRegistryCheck').checked;
+  try {
+    const res = await auth.authFetch('/admin/jar-registry/enabled', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
+    if (res.ok) {
+      status.textContent = t('saved');
+      status.className = 'status-text success';
+    } else {
+      status.textContent = t('saveFailed');
+      status.className = 'status-text error';
+    }
+  } catch {
+    status.textContent = t('networkError');
+    status.className = 'status-text error';
+  }
+  setTimeout(() => { status.textContent = ''; }, 3000);
+}
+
+async function refreshJarRegistry(reset) {
+  const btn = $('jarRefreshBtn');
+  const status = $('jarRefreshStatus');
+  btn.disabled = true;
+  btn.textContent = t('refreshing');
+  btn.className = 'btn btn-sm loading';
+  status.textContent = '';
+
+  let round = 0;
+  let lastOk = 0;
+  let done = false;
+  const body = round === 0 && reset ? JSON.stringify({ reset: true }) : '{}';
+
+  while (!done) {
+    round++;
+    try {
+      const res = await auth.authFetch('/admin/jar-registry/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: round === 1 && reset ? JSON.stringify({ reset: true }) : '{}'
+      });
+      const d = await res.json();
+      if (!res.ok || !d.success) {
+        status.textContent = d.error || t('saveFailed');
+        status.className = 'status-text error';
+        break;
+      }
+      lastOk = d.okCount;
+      done = d.done;
+      status.textContent = d.okCount + '/' + d.total + ' JARs (' + d.totalClasses + ' classes)' + (done ? '' : ' ...');
+      status.className = 'status-text success';
+      btn.textContent = t('refreshing') + ' ' + d.okCount + '/' + d.total;
+    } catch {
+      status.textContent = t('networkError');
+      status.className = 'status-text error';
+      break;
+    }
+  }
+
+  btn.disabled = false;
+  btn.textContent = t('refreshJarRegistry');
+  btn.className = 'btn btn-sm';
+  loadJarRegistry();
+  if (done) setTimeout(() => { status.textContent = ''; }, 8000);
+}
+
+async function toggleJarReport() {
+  const panel = $('jarReportPanel');
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  panel.innerHTML = '<div>' + t('loading') + '</div>';
+  try {
+    const res = await auth.authFetch('/admin/jar-registry/report');
+    if (!res.ok) { const d = await res.json(); panel.innerHTML = '<div style="color:var(--red)">' + (d.error || 'Error') + '</div>'; return; }
+    const d = await res.json();
+    let html = '<div style="margin-bottom:8px"><strong>' + t('globalSpider') + ':</strong> ' + (d.globalSpider ? d.globalSpider.substring(0, 60) + '...' : 'N/A') + '</div>';
+    html += '<div style="margin-bottom:8px">' + t('coveredSites') + ': <span style="color:var(--green)">' + (d.stats?.coveredByGlobal || 0) + '</span> global + <span style="color:var(--amber)">' + (d.stats?.coveredByPerSite || 0) + '</span> per-site | ' + t('orphanedSites') + ': <span style="color:var(--red)">' + (d.stats?.orphaned || 0) + '</span> | URL api: ' + (d.stats?.urlBasedApi || 0) + '</div>';
+    if (d.jars?.length) {
+      html += '<table style="width:100%;border-collapse:collapse;font-size:0.75rem"><tr style="border-bottom:1px solid var(--border)"><th style="text-align:left;padding:4px">JAR</th><th>Classes</th><th>Size</th><th>Status</th></tr>';
+      for (const j of d.jars) {
+        const statusColor = j.status === 'ok' ? 'var(--green)' : 'var(--red)';
+        html += '<tr style="border-bottom:1px solid var(--border)"><td style="padding:4px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + j.url + '">' + (j.isGlobal ? '★ ' : '') + j.url.substring(0, 40) + '...</td><td style="text-align:center">' + j.classCount + '</td><td style="text-align:center">' + (j.sizeBytes ? (j.sizeBytes / 1024 / 1024).toFixed(1) + 'MB' : '-') + '</td><td style="text-align:center;color:' + statusColor + '">' + j.status + '</td></tr>';
+      }
+      html += '</table>';
+    }
+    if (d.orphanedSites?.length) {
+      html += '<div style="margin-top:8px"><strong>' + t('orphanedSites') + ' (' + d.orphanedSites.length + '):</strong></div>';
+      html += '<div style="font-size:0.75rem;color:var(--text-secondary);max-height:150px;overflow:auto">';
+      for (const o of d.orphanedSites.slice(0, 50)) {
+        html += '<div>' + o.key + ' → csp_' + o.neededClass + '</div>';
+      }
+      if (d.orphanedSites.length > 50) html += '<div>... +' + (d.orphanedSites.length - 50) + ' more</div>';
+      html += '</div>';
+    }
+    panel.innerHTML = html;
+  } catch {
+    panel.innerHTML = '<div style="color:var(--red)">' + t('networkError') + '</div>';
+  }
 }
 
 // --- Refresh ---

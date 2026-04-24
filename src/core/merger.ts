@@ -1,6 +1,6 @@
 // 站点级合并引擎
 
-import type { TVBoxConfig, TVBoxSite, SourcedConfig } from './types';
+import type { TVBoxConfig, TVBoxSite, SourcedConfig, JarAssignment } from './types';
 import { normalizeConfig, extractSpiderJarUrl } from './parser';
 import {
   deduplicateSites,
@@ -19,12 +19,21 @@ import {
  * 2. Spider JAR 智能分配（全局 + per-site）
  * 3. 各字段去重合并
  */
-export function mergeConfigs(sourcedConfigs: SourcedConfig[]): TVBoxConfig {
+export function mergeConfigs(sourcedConfigs: SourcedConfig[], jarAssignment?: JarAssignment): TVBoxConfig {
   // Step 1: 规范化所有配置
   const normalized = sourcedConfigs.map(normalizeConfig);
 
-  // Step 2: 确定全局 spider（选引用次数最多的 JAR）
-  const globalSpider = selectGlobalSpider(normalized);
+  // Step 2: 确定全局 spider
+  let globalSpider: string | null;
+  let globalSpiderFull: string | null = null;
+
+  if (jarAssignment) {
+    globalSpider = jarAssignment.globalSpiderUrl;
+    globalSpiderFull = jarAssignment.globalSpiderFull;
+  } else {
+    globalSpider = selectGlobalSpider(normalized);
+    globalSpiderFull = globalSpider ? findFullSpiderString(normalized, globalSpider) : null;
+  }
 
   // Step 3: 收集并合并所有字段
   const allSites: TVBoxSite[] = [];
@@ -45,11 +54,24 @@ export function mergeConfigs(sourcedConfigs: SourcedConfig[]): TVBoxConfig {
         const siteCopy = { ...site };
 
         if (site.type === 3 && !site.jar) {
-          // type:3 站点没有自己的 jar，需要从配置的 spider 继承
-          const spiderJar = extractSpiderJarUrl(config.spider);
-          if (spiderJar && spiderJar !== globalSpider) {
-            // 不是全局 spider，写入 per-site jar
-            siteCopy.jar = config.spider; // 保留完整的 spider 字符串（含 md5）
+          if (jarAssignment) {
+            // JAR 仓库模式：精确分配
+            const dk = `${site.key}|${site.api}`;
+            if (jarAssignment.orphanedKeys.has(dk)) {
+              siteCopy.searchable = 0;
+              siteCopy.quickSearch = 0;
+            } else {
+              const perSiteSpider = jarAssignment.siteJarMap.get(dk);
+              if (perSiteSpider) {
+                siteCopy.jar = perSiteSpider;
+              }
+            }
+          } else {
+            // 旧路径：投票制
+            const spiderJar = extractSpiderJarUrl(config.spider);
+            if (spiderJar && spiderJar !== globalSpider) {
+              siteCopy.jar = config.spider;
+            }
           }
         }
 
@@ -79,15 +101,18 @@ export function mergeConfigs(sourcedConfigs: SourcedConfig[]): TVBoxConfig {
   };
 
   // 设置全局 spider
-  if (globalSpider) {
-    // 找到使用该 JAR 的完整 spider 字符串（含 md5）
+  if (jarAssignment) {
+    if (globalSpiderFull) merged.spider = globalSpiderFull;
+    else if (globalSpider) merged.spider = globalSpider;
+  } else if (globalSpider) {
     const fullSpider = findFullSpiderString(normalized, globalSpider);
     merged.spider = fullSpider || globalSpider;
   }
 
   console.log(
     `[merger] Merged: ${merged.sites?.length} sites, ` +
-      `${merged.parses?.length} parses, ${merged.lives?.length} lives`,
+      `${merged.parses?.length} parses, ${merged.lives?.length} lives` +
+      (jarAssignment ? ` (JAR registry: ${jarAssignment.stats.orphaned} orphaned)` : ''),
   );
 
   return merged;

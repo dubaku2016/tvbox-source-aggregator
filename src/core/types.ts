@@ -153,3 +153,36 @@ export interface AppConfig {
   cronSchedule?: string;
   workerBaseUrl?: string;  // CF 版设置，如 "https://tvbox.example.com"；本地不设置
 }
+
+// JAR 仓库：单个 JAR 的元数据
+export interface JarMeta {
+  url: string;
+  md5: string | null;
+  classes: string[];       // DEX 中提取的 spider 类名 ["Ali","Bili",...]
+  sizeBytes?: number;
+  lastFetchedAt: string;   // ISO
+  status: 'ok' | 'fetch_failed' | 'parse_failed';
+  errorMessage?: string;
+}
+
+// JAR 仓库：完整索引（序列化存 KV）
+export interface JarRegistry {
+  version: 1;
+  updatedAt: string;
+  jars: Record<string, JarMeta>; // key = JAR URL
+}
+
+// JAR 分配结果（纯计算，不持久化）
+export interface JarAssignment {
+  globalSpiderUrl: string | null;
+  globalSpiderFull: string | null;
+  siteJarMap: Map<string, string>;   // dedupKey(key|api) → 完整 spider 字符串
+  orphanedKeys: Set<string>;         // dedupKey 集合，类找不到的站点
+  stats: {
+    totalType3: number;
+    coveredByGlobal: number;
+    coveredByPerSite: number;
+    orphaned: number;
+    urlBasedApi: number;
+  };
+}

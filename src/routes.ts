@@ -3,11 +3,12 @@
 import { Hono } from 'hono';
 import type { Storage } from './storage/interface';
 import type { AppConfig, SourceEntry, MacCMSSourceEntry, LiveSourceEntry, NameTransformConfig } from './core/types';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_MANUAL_SOURCES, KV_LAST_UPDATE, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, LIVE_PROXY_TTL, IMG_PROXY_TTL, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_CRON_INTERVAL, DEFAULT_CRON_INTERVAL, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED } from './core/config';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_MANUAL_SOURCES, KV_LAST_UPDATE, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, LIVE_PROXY_TTL, IMG_PROXY_TTL, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_CRON_INTERVAL, DEFAULT_CRON_INTERVAL, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_JAR_REGISTRY_ENABLED, KV_JAR_REGISTRY, KV_JAR_BIN_PREFIX } from './core/config';
 import { parseConfigJson, isMultiRepoConfig, extractMultiRepoEntries } from './core/fetcher';
 import { decodeConfigResponse } from './core/decoder';
 import { validateMacCMS } from './core/maccms';
-import { lookupJarUrl, isMd5Key } from './core/jar-proxy';
+import { lookupJarUrl, isMd5Key, base64ToUint8Array } from './core/jar-proxy';
+import { loadJarRegistry, buildJarRegistry, assignJars, buildJarStorageAdapter } from './core/jar-registry';
 import { lookupLiveUrl } from './core/live-source';
 import { adminHtml } from './core/admin';
 import { dashboardHtml } from './core/dashboard';
@@ -398,6 +399,110 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({ success: true, enabled: body.enabled });
   });
 
+  // ─── JAR 仓库 Admin API ──────────────────────────────
+  app.get('/admin/jar-registry/enabled', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const raw = await storage.get(KV_JAR_REGISTRY_ENABLED);
+    return c.json({ enabled: raw === 'true' });
+  });
+
+  app.put('/admin/jar-registry/enabled', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    let body: { enabled?: boolean };
+    try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON' }, 400); }
+    if (typeof body.enabled !== 'boolean') return c.json({ error: 'enabled must be a boolean' }, 400);
+    await storage.put(KV_JAR_REGISTRY_ENABLED, String(body.enabled));
+    return c.json({ success: true, enabled: body.enabled });
+  });
+
+  app.get('/admin/jar-registry', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const registry = await loadJarRegistry(storage);
+    return c.json(registry || { version: 1, updatedAt: null, jars: {} });
+  });
+
+  app.get('/admin/jar-registry/report', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const registry = await loadJarRegistry(storage);
+    if (!registry) return c.json({ error: 'No JAR registry. Enable and refresh first.' }, 404);
+
+    const configRaw = await storage.get(KV_MERGED_CONFIG_FULL);
+    if (!configRaw) return c.json({ error: 'No merged config available' }, 404);
+
+    // 构造 SourcedConfig[] 用于 assignJars
+    const mergedConfig: TVBoxConfig = JSON.parse(configRaw);
+    const fakeSourced = [{ sourceUrl: 'merged', sourceName: 'merged', config: mergedConfig }];
+    const assignment = assignJars(registry, fakeSourced);
+
+    const jarSummaries = Object.values(registry.jars).map((j) => ({
+      url: j.url,
+      status: j.status,
+      classCount: j.classes.length,
+      sizeBytes: j.sizeBytes,
+      lastFetchedAt: j.lastFetchedAt,
+      errorMessage: j.errorMessage,
+      isGlobal: j.url === assignment.globalSpiderUrl,
+    }));
+
+    const orphanedList = Array.from(assignment.orphanedKeys).map((dk) => {
+      const [key, api] = dk.split('|');
+      return { key, api, neededClass: api?.startsWith('csp_') ? api.substring(4) : api };
+    });
+
+    return c.json({
+      globalSpider: assignment.globalSpiderUrl,
+      stats: assignment.stats,
+      jars: jarSummaries.sort((a, b) => b.classCount - a.classCount),
+      orphanedSites: orphanedList,
+    });
+  });
+
+  app.post('/admin/jar-registry/refresh', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+
+    try {
+    let body: { reset?: boolean } = {};
+    try { body = await c.req.json(); } catch { /* no body is fine */ }
+
+    const configRaw = await storage.get(KV_MERGED_CONFIG_FULL);
+    if (!configRaw) return c.json({ error: 'No merged config. Run aggregation first.' }, 404);
+
+    const mergedConfig: TVBoxConfig = JSON.parse(configRaw);
+    const fakeSourced = [{ sourceUrl: 'merged', sourceName: 'merged', config: mergedConfig }];
+
+    // reset=true 时清除旧 registry 强制全部重下载
+    if (body.reset) {
+      await storage.put(KV_JAR_REGISTRY, '');
+    }
+
+    // refresh 只解析类名，不存 JAR 二进制（省 CPU，二进制存储由聚合流程处理）
+    const BATCH_SIZE = 1; // CF 免费版每次只处理 1 个 JAR（DEFLATE 解压吃 CPU）
+    const result = await buildJarRegistry(fakeSourced, storage, config.fetchTimeoutMs, undefined, {
+      skipColdStartCheck: true,
+      batchLimit: BATCH_SIZE,
+    });
+    if (!result) return c.json({ error: 'No JARs found in config' }, 404);
+
+    const { registry, processed, remaining, total } = result;
+    const okCount = Object.values(registry.jars).filter((j) => j.status === 'ok').length;
+    const totalClasses = Object.values(registry.jars).reduce((s, j) => s + j.classes.length, 0);
+
+    return c.json({
+      success: true,
+      jarCount: Object.keys(registry.jars).length,
+      okCount,
+      totalClasses,
+      processed,
+      remaining,
+      total,
+      done: remaining === 0,
+    });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? `${err.message}\n${err.stack}` : String(err);
+      return c.json({ error: msg }, 500);
+    }
+  });
+
   // ─── MacCMS 边缘代理（仅 CF 版）──────────────────────
   if (config.workerBaseUrl) {
     app.all('/api/:key', async (c) => {
@@ -447,31 +552,47 @@ export function createApp(deps: AppDeps): Hono {
       }
 
       // 3. 流式透传
+      const ttl = isMd5Key(key) ? 86400 : 21600; // MD5 key → 24h, URL hash → 6h
       try {
         const resp = await fetch(originalUrl, {
           headers: { 'User-Agent': 'okhttp/3.12.0' },
         });
 
-        if (!resp.ok) {
-          return c.json({ error: `Origin returned ${resp.status}` }, 502);
+        if (resp.ok) {
+          const response = new Response(resp.body, {
+            headers: {
+              'Content-Type': 'application/octet-stream',
+              'Cache-Control': `public, max-age=${ttl}`,
+              'Access-Control-Allow-Origin': '*',
+            },
+          });
+          c.executionCtx.waitUntil(cache.put(cacheKey, response.clone()));
+          return response;
         }
 
-        // 4. 构建响应 + 异步写缓存
-        const ttl = isMd5Key(key) ? 86400 : 21600; // MD5 key → 24h, URL hash → 6h
-        const response = new Response(resp.body, {
+        // Origin 失败 → 降级到 KV 二进制缓存
+        console.log(`[jar-proxy] Origin returned ${resp.status} for ${key}, trying KV binary cache`);
+      } catch (error: unknown) {
+        console.log(`[jar-proxy] Origin fetch error for ${key}: ${error instanceof Error ? error.message : error}`);
+      }
+
+      // 4. 降级：从 KV 读取 base64 编码的 JAR 二进制
+      const binBase64 = await storage.get(KV_JAR_BIN_PREFIX + key);
+      if (binBase64) {
+        console.log(`[jar-proxy] Serving ${key} from KV binary cache`);
+        const binary = base64ToUint8Array(binBase64);
+        const response = new Response(binary, {
           headers: {
             'Content-Type': 'application/octet-stream',
             'Cache-Control': `public, max-age=${ttl}`,
             'Access-Control-Allow-Origin': '*',
           },
         });
-
         c.executionCtx.waitUntil(cache.put(cacheKey, response.clone()));
         return response;
-      } catch (error: unknown) {
-        const msg = error instanceof Error ? error.message : String(error);
-        return c.json({ error: msg }, 502);
       }
+
+      return c.json({ error: 'JAR unavailable from origin and no binary cache' }, 502);
     });
   }
 

@@ -41,7 +41,7 @@ export function parseSpiderString(spider: string): {
  * 为 URL 生成短 key（无 MD5 时使用）
  * 用 Web Crypto 的 SHA-256 取前 16 位 hex
  */
-async function urlToKey(url: string): Promise<string> {
+export async function urlToKey(url: string): Promise<string> {
   const data = new TextEncoder().encode(url);
   const hash = await crypto.subtle.digest('SHA-256', data);
   const bytes = new Uint8Array(hash);
@@ -159,4 +159,21 @@ export async function lookupJarUrl(key: string, storage: Storage): Promise<strin
  */
 export function isMd5Key(key: string): boolean {
   return /^[0-9a-f]{32}$/i.test(key);
+}
+
+export function uint8ArrayToBase64(data: Uint8Array): string {
+  const chars = new Array<string>(data.length);
+  for (let i = 0; i < data.length; i++) {
+    chars[i] = String.fromCharCode(data[i]);
+  }
+  return btoa(chars.join(''));
+}
+
+export function base64ToUint8Array(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }

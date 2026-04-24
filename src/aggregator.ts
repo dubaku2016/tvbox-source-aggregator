@@ -8,11 +8,12 @@ import { batchSiteSpeedTest, appendSpeedToName, filterUnreachableSites } from '.
 import { macCMSToTVBoxSites, processMacCMSForLocal } from './core/maccms';
 import { rewriteJarUrls } from './core/jar-proxy';
 import { batchTestLiveSources, liveSourcesToTVBoxLives } from './core/live-source';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED } from './core/config';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_JAR_REGISTRY_ENABLED } from './core/config';
 import { loadBlacklist, applyBlacklist, pruneBlacklist, saveBlacklist } from './core/blacklist';
 import { transformSiteNames } from './core/cleaner';
 import { parseConfigJson } from './core/fetcher';
-import type { NameTransformConfig } from './core/types';
+import { buildJarRegistry, assignJars, buildJarStorageAdapter } from './core/jar-registry';
+import type { NameTransformConfig, JarAssignment } from './core/types';
 
 export async function runAggregation(storage: Storage, config: AppConfig): Promise<void> {
   const startTime = Date.now();
@@ -113,10 +114,34 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
     console.log('[aggregation] Step 3: No speed data available, skipping filter');
   }
 
+  // Step 3.5: JAR 仓库分析（可选）
+  let jarAssignment: JarAssignment | undefined;
+  const jarRegistryEnabled = (await storage.get(KV_JAR_REGISTRY_ENABLED)) === 'true';
+  if (jarRegistryEnabled) {
+    console.log('[aggregation] Step 3.5: Building JAR registry...');
+    try {
+      const allConfigsForJar = [...filteredConfigs, ...inlineConfigs, ...macCMSConfigs];
+      const saveJarBin = buildJarStorageAdapter(storage, !!config.workerBaseUrl);
+      const result = await buildJarRegistry(allConfigsForJar, storage, config.fetchTimeoutMs, saveJarBin);
+      if (result) {
+        jarAssignment = assignJars(result.registry, allConfigsForJar);
+        console.log(
+          `[aggregation] JAR registry: global covers ${jarAssignment.stats.coveredByGlobal}, ` +
+          `per-site ${jarAssignment.stats.coveredByPerSite}, orphaned ${jarAssignment.stats.orphaned}`,
+        );
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[aggregation] JAR registry failed, falling back to vote: ${msg}`);
+    }
+  } else {
+    console.log('[aggregation] Step 3.5: JAR registry disabled, using vote-based spider selection');
+  }
+
   // Step 4: 合并（包含 MacCMS 源）
   console.log('[aggregation] Step 4: Merging configs...');
   const allConfigs = [...filteredConfigs, ...inlineConfigs, ...macCMSConfigs];
-  let merged = mergeConfigs(allConfigs);
+  let merged = mergeConfigs(allConfigs, jarAssignment);
 
   // 将额外直播源注入到 merged.lives
   if (extraLives.length > 0) {

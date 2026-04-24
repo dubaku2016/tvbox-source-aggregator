@@ -42,3 +42,8 @@ export const TVBOX_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5
 // 定时任务间隔（分钟）
 export const KV_CRON_INTERVAL = 'cron_interval';
 export const DEFAULT_CRON_INTERVAL = 1440; // 默认每天一次
+
+// JAR 仓库
+export const KV_JAR_REGISTRY = 'jar_registry';
+export const KV_JAR_REGISTRY_ENABLED = 'jar_registry_enabled';
+export const KV_JAR_BIN_PREFIX = 'jar_bin:'; // JAR 二进制 base64 缓存

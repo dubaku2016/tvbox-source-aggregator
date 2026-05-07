@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 # 自定义域名（可选，推荐配置）
 # 取消注释并替换为你自己的域名和 Zone ID
 routes = [
-  { pattern = "tvbox.snices.de5.net/*", zone_id = "snices.de5.net" }
+  { pattern = "tvbox.snices.de5.net/*", zone_id = "fbba60d8f9dae4c83a02807cd26fd17c" }
 ]
 
 [triggers]

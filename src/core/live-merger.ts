@@ -149,8 +149,37 @@ function parseTxt(content: string, source: string, sourceSpeedMs?: number): Chan
   return out;
 }
 
+function sanitizeTxtLabel(label: string, fallback: string): string {
+  const cleaned = label.replace(/[\r\n]+/g, ' ').replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleaned || fallback;
+}
+
+/**
+ * 将 TVBox Native live groups 转为 DIYP/txt 格式：
+ *   央视,#genre#
+ *   CCTV-1,http://url1$源A#http://url2$源B
+ */
+export function formatLiveGroupsAsTxt(groups: TVBoxLiveGroup[]): string {
+  const lines: string[] = [];
+
+  for (const group of groups) {
+    const groupName = sanitizeTxtLabel(group.group || '', '其他');
+    lines.push(`${groupName},#genre#`);
+
+    for (const channel of group.channels || []) {
+      const urls = (channel.urls || []).filter((url) => url.trim());
+      if (urls.length === 0) continue;
+
+      const channelName = sanitizeTxtLabel(channel.name || '', '未命名');
+      lines.push(`${channelName},${urls.join('#')}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 /** 自动识别 m3u 还是 txt */
-function parseLiveContent(content: string, source: string, sourceSpeedMs?: number): ChannelEntry[] {
+export function parseLiveContent(content: string, source: string, sourceSpeedMs?: number): ChannelEntry[] {
   if (content.includes('#EXTM3U') || content.includes('#EXTINF')) {
     return parseM3U(content, source, sourceSpeedMs);
   }
@@ -409,4 +438,64 @@ export function extractAllUrls(groups: TVBoxLiveGroup[]): string[] {
     }
   }
   return Array.from(set);
+}
+
+/**
+ * 轻量级实时解析：给定一组 m3u/txt URL，下载并解析为 TVBoxLiveGroup[]
+ * 用于 /live-config 端点在 FongMi 格式下实时转换
+ */
+export async function fetchAndParseLiveUrls(
+  urls: Array<{ name: string; url: string; header?: Record<string, string> }>,
+  timeoutMs = 8000,
+): Promise<TVBoxLiveGroup[]> {
+  if (urls.length === 0) return [];
+
+  const results = await Promise.allSettled(
+    urls.map(async (input) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const resp = await fetch(input.url, {
+          signal: controller.signal,
+          headers: { 'User-Agent': TVBOX_UA, ...(input.header || {}) },
+        });
+        clearTimeout(timer);
+        if (!resp.ok) return null;
+        const text = await resp.text();
+        if (!text || text.length < 20) return null;
+        return { content: text, name: input.name };
+      } catch {
+        clearTimeout(timer);
+        return null;
+      }
+    }),
+  );
+
+  const allEntries: Array<{ group: string; name: string; url: string }> = [];
+  for (const r of results) {
+    if (r.status !== 'fulfilled' || !r.value) continue;
+    const entries = parseLiveContent(r.value.content, r.value.name);
+    allEntries.push(...entries);
+  }
+
+  // 按 group + name 合并 urls
+  const groupMap = new Map<string, Map<string, string[]>>();
+  for (const e of allEntries) {
+    const grp = e.group || '其他';
+    if (!groupMap.has(grp)) groupMap.set(grp, new Map());
+    const channels = groupMap.get(grp)!;
+    if (!channels.has(e.name)) channels.set(e.name, []);
+    const urls = channels.get(e.name)!;
+    if (!urls.includes(e.url)) urls.push(e.url);
+  }
+
+  const groups: TVBoxLiveGroup[] = [];
+  for (const [group, channels] of groupMap) {
+    const chs: TVBoxLiveChannel[] = [];
+    for (const [name, urls] of channels) {
+      chs.push({ name, urls });
+    }
+    groups.push({ group, channels: chs });
+  }
+  return groups;
 }

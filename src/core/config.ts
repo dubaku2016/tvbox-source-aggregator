@@ -79,6 +79,8 @@ export const KV_DEDUP_CONFIG = 'dedup_config';
 
 // 直播禁用开关
 export const KV_LIVE_DISABLED = 'live_disabled';
+// 直播合并模式：'separated'（按源分类）| 'merged'（全部合并）
+export const KV_LIVE_MERGE_MODE = 'live_merge_mode';
 
 // 智能 Base URL
 export const BASE_URL_PLACEHOLDER = '{{BASE_URL}}';
@@ -88,6 +90,9 @@ export const KV_SMART_BASE_URL_ENABLED = 'smart_base_url_enabled';
 export const KV_SITE_HEALTH_MAP = 'site_health_map';
 export const KV_SITE_PROBE_DEPTH = 'site_probe_depth'; // 'shallow' | 'deep'
 export const KV_SITE_AUTO_CLEAN = 'site_auto_clean';   // 'true' | 'false'
+
+// Builder 源追踪
+export const KV_SOURCE_MAP = 'builder_source_map'; // { sites: Record, parses: Record, lives: Record }
 
 // 频道测速 cron：每 12 小时
 export const CHANNEL_PROBE_CRON = '0 */12 * * *';
